@@ -1,0 +1,247 @@
+:doctitle: Transactions with JDBC
+
+[#_top]
+== Transactions
+
+Transactions are a way to group multiple SQL statements into a single unit of work. If any of the statements fail, the entire transaction is rolled back, so that the database is left in the same state as before the transaction started.
+
+Transactions are used to ensure that a series of statements are executed as a single unit of work. This is important when you need to ensure that all statements are executed successfully, or none at all.
+
+To ensure that any modification to the underlying database is atomic, you need to use transactions. This is especially important when you have multiple statements that need to be executed together.
+
+Transactions are used to ensure that a series of statements are executed as a single unit of work. This is important when you need to ensure that all statements are executed successfully, or none at all.
+
+ACID properties of transactions:
+
+* Atomicity: All statements in a transaction are executed as a single unit of work. If any statement fails, the entire transaction is rolled back.
+* Consistency: The database is left in a consistent state after a transaction is completed.
+* Isolation: Transactions are isolated from each other, so that they do not interfere with each other.
+* Durability: Once a transaction is committed, the changes are permanent and cannot be undone.
+
+To make the concept easier to use and test, we introduce a TransactionToken interface, that can be mocked easily but is also simple to implement with a real database connection.
+
+The defintion of the TransactionToken interface is as follows:
+
+[source,java]
+----
+package io.github.jristretto.transactions;
+
+public interface TransactionToken extends AutoCloseable {
+    void commit(); // commit the transaction
+    void abort(); // abort the transaction
+    long transactionId(); // return the transaction id
+}
+----
+
+We will explain the use of the TransactionToken interface with an example. 
+
+=== Exam grades example
+
+In a school, students take exams and receive grades. The grades are stored in a database table called `grades`, which has the following schema:
+
+[source,sql]
+----
+CREATE TABLE exam_grades (
+    student_id INT,
+    exam_event_id INT,
+    grade INT,
+    transaction_id BIGINT
+);
+----
+
+The `transaction_id` column is used to group multiple statements into a single transaction. When a student takes an exam, the grade is inserted into the `exam_grades` table. The `transaction_id` column is used to group all the statements related to the exam grade into a single transaction.
+
+The transaction is further described in a transactions table, which contains the commiting user, the date and of course the trasaction id.
+
+[source,sql]
+----
+CREATE TABLE transactions (
+    transaction_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id INT,
+    transaction_date DATE
+);
+----
+
+The exam_event_id connects the exam to the exam event, which is described in a separate table.
+
+[source,sql]
+----
+CREATE TABLE exam_events (
+    exam_event_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    exam_name VARCHAR(64),
+    exam_notes TEXT,
+    exam_date DATE
+);
+----
+
+That explains the database schema. Now let us show how to use the TransactionToken interface to group multiple statements into a single transaction.
+
+Exam grades typically come from some file like a spreadsheet or a CSV file. To make it easy for the examiner to add the data to a database the data
+can be copied from the source, using multiple lines and pasted into the web interface of the grade adminstration system.
+The business logic at the backend will therefor have to deal with a list of grades to be inserted. The list of grades can have any content, per the examiners choice, as long as the first column
+contains a valid student id, and the lasdt column the grade to be assigned. This is fitting to the most common use case, where the examiner has a list of students and their grades.
+In the web interface the examiner can then select the exam event to which the grades are to be assigned. The event in this case is prepared by the exam adminstration in advance, and describes an exam session.
+
+The class that we want to develop is the GradeCollector class, and a GradeCapture class. The GradeCollector class will participate in the transaction and the grade captre class will extract student number and grade from the input list. It will than return a ResultRecord object, which will be used by the GradeCollector to insert the grade into the database.
+The ResultRecord object will have the information of the exam_grades rows, so it will contain the student id, the exam event id, and the grade to be inserted and the transaction id, so that the transaction can be grouped together, AND the when and who can be identified through the transaction table.
+
+The GradeCollector class will have a method that will take a list of ResultRecord objects and insert the grades into the database. The method will use the TransactionToken interface to group the insert statements into a single transaction.
+
+First the ResultRecord class is defined:
+
+[source,java]
+----
+package io.github.jristretto.exams;
+
+public record ResultRecord(
+    int studentId,
+    int examEventId,
+    int grade,
+    long transactionId
+) {
+}
+----
+
+As you can see it is a simple data transfer object, that will be used to pass the data from the GradeCapture class to the GradeCollector class. It does no validation on its own, that is
+done in the GradeCapture class and/or to the database.
+
+The GradeCapture class implements a Function to turn a line (String) into a ResultRecord object, so that it can be used as an map function in a Java Stream.
+As explained before, the input lines can contain any data on the examiners discretion, as long as the _first column_ contains the student id and the _last column_ contains the grade.
+We will use a regular expression to extract the student id and the grade from the input line. A valid student_id contains 7 consecutive digits. A grade is a two digit number separated with a comma or period. So 7,7 or 5.2 are both valid, as i 8 and 10. However 10.0 or above is not accepted. The grade must be the last part in the line. All columns are seperated with one or more tabs or spaces. 
+
+To make the regular expression better maintainable, we will define the regular expression as a constant in the class, we use comments in said expression and use named groups to make the code more readable.
+
+
+The exact regular expression is left as an exercise to the reader, but the code will look like this:
+
+[source,java]
+----
+package io.github.jristretto.exams;
+
+import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class GradeCapture implements Function<String, ResultRecord> {
+    private static final Pattern GRADE_PATTERN = Pattern.compile(
+        "(?<studentId>\\d{7})" + // 7 digits
+        "(\\s+)" + // one or more spaces
+        "(?<grade>(10|\\d{1}([,.]\\d{1})?)" + // 1 or 2 digits, comma or period, 1 digit
+        "$" // nothing else
+    );
+
+    final int examEventId;
+    final int transactionId;
+
+    public GradeCapture(int examEventId, int transactionId) {
+        this.examEventId = examEventId;
+        this.transactionId = transactionId;
+    }
+
+    @Override
+    public ResultRecord apply(String line) {
+        Matcher matcher = GRADE_PATTERN.matcher(line);
+        if (matcher.find()) {
+            int studentId = Integer.parseInt(matcher.group("studentId"));
+            int grade = (int) (Double.parseDouble(matcher.group("grade")) * 10);
+            return new ResultRecord(studentId, 0, grade, 0);
+        } else {
+            throw new CaptureException(line );
+        }
+    }
+}
+----
+
+The GradeCapture class has a constructor that takes the exam event id and the transaction id as arguments. The apply method takes a line of input and extracts the student id and grade from the line using a regular expression. The student id is extracted from the first 7 digits in the line, and the grade is extracted from the last two digits in the line. The grade is multiplied by 10 to convert it to an integer.
+
+Anyone hates a cryptic error message, so we define a CaptureException class, that will be thrown if the regular expression does not match the input line. The exception class will try to make a good gues of what went wrong in the line. It uses regular expressions itself to see what went well and what went wrong. There are 3 cases: The student_id is wrong, the grade is wrong or both. In case both were accaptable, the exception will not have been thrown, so we do not need to consider that. We want the exception to be a runtime exception, so it fits well with java streaming.
+
+Since calling super(...) must be the first statement in a constructor, we will use a static method to analyse the line. The static method will return a string that will be used as the message in the exception.
+
+
+[source,java]
+----
+package io.github.jristretto.exams;
+
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class CaptureException extends RuntimeException {
+    private static final Pattern STUDENT_ID_PATTERN = Pattern.compile("\\d{7}");
+    private static final Pattern GRADE_PATTERN = Pattern.compile("(10|\\d{1}([,.]\\d{1})?)");
+
+    public CaptureException(String line) {
+        super(analyse(line));
+    }
+
+    private static String analyse(String line) {
+        Matcher studentIdMatcher = STUDENT_ID_PATTERN.matcher(line);
+        Matcher gradeMatcher = GRADE_PATTERN.matcher(line);
+        if (!studentIdMatcher.find() && !gradeMatcher.find()) {
+            return "Cannot find student id and grade in line "+line+"'";
+        } else if (!studentIdMatcher.find()) {
+            return "Student id is missing, but found grade in line '"+line+"'";
+        } else if (!gradeMatcher.find()) {
+            return "Grade is missing";
+        } else {
+            return "Unknown error";
+        }
+    }
+}
+----
+
+The GradeCollector class will have a method that takes a list of ResultRecord objects and inserts the grades into the database. The method will use the TransactionToken interface to group the insert statements into a single transaction.
+
+[source,java]
+----
+package io.github.jristretto.exams;
+
+import io.github.jristretto.transactions.TransactionToken;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.List;
+
+public class GradeCollector {
+    private final Connection connection;
+
+    public GradeCollector(Connection connection) {
+        this.connection = connection;
+    }
+
+    public void insertGrades(List<ResultRecord> grades, TransactionToken transactionToken) {
+        try {
+            connection.setAutoCommit(false);
+            for (ResultRecord grade : grades) {
+                insertGrade(grade, transactionToken);
+            }
+            transactionToken.commit();
+        } catch (SQLException e) {
+            try {
+                transactionToken.abort();
+            } catch (SQLException e1) {
+                e1.printStackTrace();
+            }
+            e.printStackTrace();
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void insertGrade(ResultRecord grade, TransactionToken transactionToken) throws SQLException {
+        String sql = "INSERT INTO exam_grades (student_id, exam_event_id, grade, transaction_id) VALUES (?, ?, ?, ?)";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, grade.studentId());
+            statement.setInt(2, grade.examEventId());
+            statement.setInt(3, grade.grade());
+            statement.setLong(4, grade.transactionId());
+            statement.executeUpdate();
+        }
+    }
+}
+----
