@@ -42,11 +42,12 @@ In a school, students take exams and receive grades. The grades are stored in a 
 [source,sql]
 ----
 CREATE TABLE exam_grades (
-    student_id INT,
+    student_id INT check (1000000 < user_id and user_id < 9999999),
     exam_event_id INT,
     grade INT,
     transaction_id BIGINT
-);
+) ON DELETE DO NOTHING;
+
 ----
 
 The `transaction_id` column is used to group multiple statements into a single transaction. When a student takes an exam, the grade is inserted into the `exam_grades` table. The `transaction_id` column is used to group all the statements related to the exam grade into a single transaction.

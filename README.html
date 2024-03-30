@@ -500,11 +500,11 @@ public interface TransactionToken extends AutoCloseable {
 <div class="listingblock">
 <div class="content">
 <pre class="highlight"><code class="language-sql" data-lang="sql">CREATE TABLE exam_grades (
-    student_id INT,
+    student_id INT check (1000000 &lt; user_id and user_id &lt; 9999999),
     exam_event_id INT,
     grade INT,
     transaction_id BIGINT
-);</code></pre>
+) ON DELETE DO NOTHING;</code></pre>
 </div>
 </div>
 <div class="paragraph">
@@ -840,7 +840,7 @@ public class GradeCollector {
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2024-03-30 14:26:05 +0100
+Last updated 2024-03-30 14:33:19 +0100
 </div>
 </div>
 </body>
