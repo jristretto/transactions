@@ -245,3 +245,117 @@ public class GradeCollector {
     }
 }
 ----
+
+
+In the above code we prepare a statement multiple times, which is not very efficient. We can prepare the statement once and use it multiple times. We can also use a batch insert to insert multiple rows at once. This will improve the performance of the code. We also want to use java streams and a closing for each, which builds up the statement and executes it. This will make the code more readable and maintainable. Of course we will consider thet CaptureException that might be thrown and should trigger an abort of the transaction.
+
+[source,java]
+----
+package io.github.jristretto.exams;
+
+import io.github.jristretto.transactions.TransactionToken;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.List;
+
+public class GradeCollector {
+    private final Connection connection;
+
+    public GradeCollector(Connection connection) {
+        this.connection = connection;
+    }
+
+    public void insertGrades(List<ResultRecord> grades, TransactionToken transactionToken) {
+        try {
+            connection.setAutoCommit(false);
+            PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO exam_grades (student_id, exam_event_id, grade, transaction_id) VALUES (?, ?, ?, ?)"
+            );
+            for (ResultRecord grade : grades) {
+                statement.setInt(1, grade.studentId());
+                statement.setInt(2, grade.examEventId());
+                statement.setInt(3, grade.grade());
+                statement.setLong(4, grade.transactionId());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+            transactionToken.commit();
+        } catch (SQLException e) {
+            try {
+                transactionToken.abort();
+            } catch (SQLException e1) {
+                e1.printStackTrace();
+            }
+            e.printStackTrace();
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+----
+
+This still does not consider the CaptureException that might be thrown. We will have to catch it and abort the transaction. We will also have to consider the case where the transaction is already aborted, so we will have to catch the SQLException that is thrown in that case.
+
+[source,java]
+----
+package io.github.jristretto.exams;
+
+import io.github.jristretto.transactions.TransactionToken;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.List;
+
+public class GradeCollector {
+    private final Connection connection;
+
+    public GradeCollector(Connection connection) {
+        this.connection = connection;
+    }
+
+    public void insertGrades(List<ResultRecord> grades, TransactionToken transactionToken) {
+        try {
+            connection.setAutoCommit(false);
+            PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO exam_grades (student_id, exam_event_id, grade, transaction_id) VALUES (?, ?, ?, ?)"
+            );
+            for (ResultRecord grade : grades) {
+                try {
+                    statement.setInt(1, grade.studentId());
+                    statement.setInt(2, grade.examEventId());
+                    statement.setInt(3, grade.grade());
+                    statement.setLong(4, grade.transactionId());
+                    statement.addBatch();
+                } catch (CaptureException e) {
+                    transactionToken.abort();
+                    e.printStackTrace();
+                }
+            }
+            statement.executeBatch();
+            transactionToken.commit();
+        } catch (SQLException e) {
+            try {
+                transactionToken.abort();
+            } catch (SQLException e1) {
+                e1.printStackTrace();
+            }
+            e.printStackTrace();
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+----
+
+The GradeCollector class is now complete. It has a constructor that takes a Connection object as an argument. The insertGrades method takes a list of ResultRecord objects and a TransactionToken object as arguments. It inserts the grades into the database using a batch insert. If an exception is thrown, the transaction is aborted and the exception is printed to the console. 
